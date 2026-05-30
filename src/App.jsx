@@ -97,6 +97,7 @@ async function dbSaveTaller(taller) {
     jefe_nombre: taller.jefe_nombre,
     jefe_email: taller.jefe_email,
     categorias_config: taller.categorias_config||{A:0,B:0,C:0},
+    activo: taller.activo !== false,
   }).eq("id",taller.id);
   if(error) console.error("update taller:",error);
 }
@@ -265,10 +266,11 @@ function ChartTooltip({ active,payload,label }) {
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 function Dashboard({ talleres,posData,onSelect,mes,setMes,anio,setAnio }) {
-  const total=talleres.reduce((s,t)=>s+t.posiciones_autorizadas,0);
-  const completados=talleres.filter(t=>(posData[pk(t.id,mes,anio)]||[]).length>0).length;
+  const talleresActivos=talleres.filter(t=>t.activo!==false);
+  const total=talleresActivos.reduce((s,t)=>s+t.posiciones_autorizadas,0);
+  const completados=talleresActivos.filter(t=>(posData[pk(t.id,mes,anio)]||[]).length>0).length;
   const chartData=useMemo(()=>getMockChartData(anio,total),[anio,total]);
-  const totalVacantes=talleres.reduce((s,t)=>{ const p=posData[pk(t.id,mes,anio)]||[]; return s+p.filter(x=>x.estatus==="vacante").length; },0);
+  const totalVacantes=talleresActivos.reduce((s,t)=>{ const p=posData[pk(t.id,mes,anio)]||[]; return s+p.filter(x=>x.estatus==="vacante").length; },0);
   const pctVacantes=total>0?Math.round(totalVacantes/total*100):0;
   const exportPDF=()=>{ const s=document.createElement("style"); s.innerHTML=`@media print{nav{display:none!important}body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}`; document.head.appendChild(s); window.print(); setTimeout(()=>document.head.removeChild(s),1000); };
   const cardS={ background:"#fff",borderRadius:16,padding:"16px 18px",boxShadow:"0 1px 4px rgba(0,0,0,0.05),0 0 0 1px rgba(0,0,0,0.04)" };
@@ -286,9 +288,9 @@ function Dashboard({ talleres,posData,onSelect,mes,setMes,anio,setAnio }) {
 
       <div style={{ display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:18 }} className="grid-stats">
         {[
-          { label:"Posiciones aut.",  val:total,                  sub:"en 11 talleres",          color:"#0B2267" },
-          { label:"Con captura",      val:`${completados}/11`,    sub:`${MESES_FULL[mes]} ${anio}`,color:"#2563EB" },
-          { label:"Sin captura",      val:11-completados,         sub:"talleres pendientes",       color:11-completados>0?"#F59E0B":"#22C55E" },
+          { label:"Posiciones aut.",  val:total,                  sub:`en ${talleresActivos.length} talleres`,color:"#0B2267" },
+          { label:"Con captura",      val:`${completados}/${talleresActivos.length}`,sub:`${MESES_FULL[mes]} ${anio}`,color:"#2563EB" },
+          { label:"Sin captura",      val:talleresActivos.length-completados,sub:"talleres pendientes",color:(talleresActivos.length-completados)>0?"#F59E0B":"#22C55E" },
           { label:"Vacantes nac.",    val:`${pctVacantes}%`,      sub:`${totalVacantes} posiciones`,color:pctVacantes>10?"#DC2626":"#94A3B8" },
         ].map(c=><div key={c.label} style={cardS}><p style={{ margin:0,fontSize:10,color:"#94A3B8",textTransform:"uppercase",letterSpacing:0.7,fontWeight:700 }}>{c.label}</p><p style={{ margin:"5px 0 2px",fontSize:24,fontWeight:800,color:c.color,letterSpacing:-0.8 }}>{c.val}</p><p style={{ margin:0,fontSize:11,color:"#94A3B8" }}>{c.sub}</p></div>)}
       </div>
@@ -316,7 +318,7 @@ function Dashboard({ talleres,posData,onSelect,mes,setMes,anio,setAnio }) {
 
       {/* Taller cards */}
       <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:10 }}>
-        {talleres.map(t=>{
+        {talleresActivos.map(t=>{
           const pos=posData[pk(t.id,mes,anio)]||[];
           const activos=pos.length?pos.filter(p=>p.estatus==="activo").length:null;
           const vacantes=pos.length?pos.filter(p=>p.estatus==="vacante").length:null;
@@ -590,7 +592,8 @@ function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,s
   const [showNewUser,setShowNewUser]=useState(false);
   const [userForm,setUserForm]=useState({nombre:"",email:"",password:"",rol:"jefe_taller",talleres_ids:[],activo:true});
   const [bitacora,setBitacora]=useState([]); const [bitAccesos,setBitAccesos]=useState([]); const [loadingBit,setLoadingBit]=useState(false);
-  const total=talleres.reduce((s,t)=>s+t.posiciones_autorizadas,0);
+  const talleresActivos=talleres.filter(t=>t.activo!==false);
+  const total=talleresActivos.reduce((s,t)=>s+t.posiciones_autorizadas,0);
   const cardStyle={ background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,0.05),0 0 0 1px rgba(0,0,0,0.04)" };
 
   const posSum=posForm.A+posForm.B+posForm.C;
@@ -712,7 +715,10 @@ function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,s
                 ):(
                   <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 16px",flexWrap:"wrap",gap:8 }}>
                     <div>
-                      <p style={{ margin:0,fontSize:14,fontWeight:600,color:"#0B2267" }}>{t.nombre}</p>
+                      <div style={{ display:"flex",alignItems:"center",gap:8 }}>
+                        <p style={{ margin:0,fontSize:14,fontWeight:600,color:t.activo===false?"#94A3B8":"#0B2267" }}>{t.nombre}</p>
+                        {t.activo===false&&<span style={{ fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:6,background:"#FEE2E2",color:"#DC2626" }}>Inactivo</span>}
+                      </div>
                       <div style={{ display:"flex",gap:6,marginTop:4,flexWrap:"wrap",alignItems:"center" }}>
                         {["A","B","C"].map(cat=>{
                           const displayCfg = posAutMes[`${t.id}-${configMes}-${configAnio}`]?.categorias_config || cfg;
@@ -729,6 +735,13 @@ function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,s
                         <p style={{ margin:0,fontSize:10,color:"#94A3B8" }}>total</p>
                       </div>
                       <button onClick={()=>startEditPos(t)} style={{ border:"1.5px solid #E2E8F0",background:"#fff",borderRadius:9,padding:"7px 14px",fontSize:12,color:"#374151",cursor:"pointer",fontFamily:FONT }}>Modificar</button>
+                      <button onClick={async()=>{ const updated={...t,activo:t.activo===false}; await dbSaveTaller(updated); setTalleres(p=>p.map(x=>x.id===t.id?updated:x)); }}
+                        style={{ fontSize:12,padding:"5px 12px",borderRadius:7,border:"1.5px solid",cursor:"pointer",fontFamily:FONT,fontWeight:600,
+                          background:t.activo===false?"#DCFCE7":"#FEE2E2",
+                          color:t.activo===false?"#14532D":"#DC2626",
+                          borderColor:t.activo===false?"#86EFAC":"#FECACA" }}>
+                        {t.activo===false?"Activar":"Dar de baja"}
+                      </button>
                     </div>
                   </div>
                 )}
