@@ -100,6 +100,20 @@ async function dbSaveTaller(taller) {
   }).eq("id",taller.id);
   if(error) console.error("update taller:",error);
 }
+
+async function dbLoadPosAutMes(tallerId, mes, anio) {
+  const { data } = await supabase.from("posiciones_autorizadas_mes")
+    .select("*").eq("taller_id",tallerId).eq("mes",mes).eq("anio",anio).maybeSingle();
+  return data||null;
+}
+
+async function dbSavePosAutMes(tallerId, mes, anio, posiciones_autorizadas, categorias_config) {
+  const { error } = await supabase.from("posiciones_autorizadas_mes").upsert({
+    taller_id: tallerId, mes, anio, posiciones_autorizadas, categorias_config
+  },{ onConflict:"taller_id,mes,anio" });
+  if(error) console.error("upsert pos_aut_mes:", error);
+}
+
 async function dbAddUsuario(u) {
   const { data,error } = await supabase.from("usuarios").insert({ nombre:u.nombre,email:u.email,password:u.password,rol:u.rol,talleres_ids:u.talleres_ids,activo:u.activo }).select().single();
   if(error){ console.error(error); return null; }
@@ -565,8 +579,10 @@ function TallerView({ taller,posiciones,onUpdate,onBulkUpdate,mes,setMes,anio,se
 }
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
-function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,setUsuarios,user }) {
+function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,setUsuarios,user,posAutMes,setPosAutMes,mes,anio }) {
   const [tab,setTab]=useState("plantilla");
+  const [configMes,setConfigMes]=useState(mes);
+  const [configAnio,setConfigAnio]=useState(anio);
   const [editPosId,setEditPosId]=useState(null);
   const [posForm,setPosForm]=useState({ total:0, A:0, B:0, C:0 });
   const [editJefeId,setEditJefeId]=useState(null); const [jefeForm,setJefeForm]=useState({jefe_nombre:"",jefe_email:""});
@@ -581,16 +597,27 @@ function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,s
   const posValid=posSum===posForm.total&&posForm.total>0;
 
   const startEditPos=(t)=>{
-    const cfg=t.categorias_config||{A:0,B:0,C:0};
-    setPosForm({ total:t.posiciones_autorizadas, A:cfg.A||0, B:cfg.B||0, C:cfg.C||0 });
+    const mesKey=`${t.id}-${configMes}-${configAnio}`;
+    const mesOverride=posAutMes[mesKey];
+    const cfg=mesOverride?mesOverride.categorias_config:(t.categorias_config||{A:0,B:0,C:0});
+    const total=mesOverride?mesOverride.posiciones_autorizadas:t.posiciones_autorizadas;
+    setPosForm({ total, A:cfg.A||0, B:cfg.B||0, C:cfg.C||0 });
     setEditPosId(t.id);
   };
 
   const savePos=async id=>{
     const t=talleres.find(x=>x.id===id); if(!t) return;
-    const updated={...t, posiciones_autorizadas:posForm.total, categorias_config:{A:posForm.A,B:posForm.B,C:posForm.C}};
-    await dbSaveTaller(updated);
-    setTalleres(p=>p.map(x=>x.id===id?updated:x));
+    const catCfg={A:posForm.A,B:posForm.B,C:posForm.C};
+    // Always save month-specific override
+    await dbSavePosAutMes(id, configMes, configAnio, posForm.total, catCfg);
+    const posAutKey=`${id}-${configMes}-${configAnio}`;
+    setPosAutMes(prev=>({...prev,[posAutKey]:{taller_id:id,mes:configMes,anio:configAnio,posiciones_autorizadas:posForm.total,categorias_config:catCfg}}));
+    // If this is the current base month (same as app mes/anio), also update taller default
+    if(configMes===mes&&configAnio===anio){
+      const updated={...t, posiciones_autorizadas:posForm.total, categorias_config:catCfg};
+      await dbSaveTaller(updated);
+      setTalleres(p=>p.map(x=>x.id===id?updated:x));
+    }
     setEditPosId(null);
   };
 
@@ -600,6 +627,22 @@ function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,s
   const toggleUser=async(id,activo)=>{ await dbToggleUsuario(id,!activo); setUsuarios(p=>p.map(u=>u.id===id?{...u,activo:!activo}:u)); };
   const deleteUser=async id=>{ await dbDeleteUsuario(id); setUsuarios(p=>p.filter(u=>u.id!==id)); };
   const toggleTallerUser=tid=>setUserForm(p=>({...p,talleres_ids:p.talleres_ids.includes(tid)?p.talleres_ids.filter(x=>x!==tid):[...p.talleres_ids,tid]}));
+  // Load month-specific overrides for all talleres when plantilla tab is active or period changes
+  useEffect(()=>{
+    if(tab!=="plantilla") return;
+    const loadAll = async () => {
+      const results = await Promise.all(
+        talleres.map(t => dbLoadPosAutMes(t.id, configMes, configAnio))
+      );
+      const newEntries = {};
+      results.forEach((data, i) => {
+        if(data) newEntries[`${talleres[i].id}-${configMes}-${configAnio}`] = data;
+      });
+      setPosAutMes(prev=>({...prev,...newEntries}));
+    };
+    loadAll();
+  },[tab, configMes, configAnio]);
+
   useEffect(()=>{ if(tab==="bitacora"){ setLoadingBit(true); Promise.all([dbLoadBitacora(),dbLoadBitacoraAccesos()]).then(([b,a])=>{ setBitacora(b); setBitAccesos(a); setLoadingBit(false); }); } },[tab]);
 
   const TABS=[{id:"plantilla",label:"Plantilla"},{id:"jefes",label:"Jefes"},{id:"usuarios",label:"Usuarios"},{id:"notificaciones",label:"Avisos"},{id:"bitacora",label:"Bitácora"}];
@@ -614,8 +657,27 @@ function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,s
       {/* ── PLANTILLA ── */}
       {tab==="plantilla"&&<>
         <div style={{ background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:12,padding:"12px 14px",marginBottom:16,display:"flex",gap:10 }}><span>⚠️</span><div><p style={{ margin:0,fontSize:13,fontWeight:700,color:"#78350F" }}>Zona restringida</p><p style={{ margin:"3px 0 0",fontSize:12,color:"#92400E" }}>Modifica solo cuando Coca-Cola autorice una variación oficial en la tarifa.</p></div></div>
+
+        {/* Month selector for per-month overrides */}
+        <div style={{ background:"#EFF6FF",border:"1px solid #BFDBFE",borderRadius:12,padding:"12px 16px",marginBottom:16 }}>
+          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10 }}>
+            <div>
+              <p style={{ margin:0,fontSize:13,fontWeight:700,color:"#1E40AF" }}>Configuración por periodo</p>
+              <p style={{ margin:"3px 0 0",fontSize:12,color:"#3B82F6" }}>Selecciona un mes y año para ver o modificar posiciones autorizadas de ese periodo específico</p>
+            </div>
+            <PeriodSelector mes={configMes} setMes={setConfigMes} anio={configAnio} setAnio={setConfigAnio}/>
+          </div>
+          <div style={{ marginTop:10,display:"flex",gap:8,alignItems:"center" }}>
+            <span style={{ fontSize:12,color:"#1E40AF",fontWeight:500 }}>
+              {Object.keys(posAutMes).filter(k=>k.endsWith(`-${configMes}-${configAnio}`)).length>0
+                ? `✓ Hay configuración específica para ${MESES_FULL[configMes]} ${configAnio}`
+                : `Usando configuración base del taller para ${MESES_FULL[configMes]} ${configAnio}`}
+            </span>
+          </div>
+        </div>
+
         <div style={cardStyle}>
-          <div style={{ padding:"12px 16px",borderBottom:"1px solid #F1F5F9",display:"flex",justifyContent:"space-between" }}><span style={{ fontSize:13,fontWeight:700,color:"#374151" }}>Posiciones y categorías por taller</span><span style={{ fontSize:12,color:"#94A3B8" }}>Total: {total}</span></div>
+          <div style={{ padding:"12px 16px",borderBottom:"1px solid #F1F5F9",display:"flex",justifyContent:"space-between" }}><span style={{ fontSize:13,fontWeight:700,color:"#374151" }}>Posiciones y categorías · {MESES_FULL[configMes]} {configAnio}</span><span style={{ fontSize:12,color:"#94A3B8" }}>Total base: {total}</span></div>
           {talleres.map((t,idx)=>{
             const cfg=t.categorias_config||{A:0,B:0,C:0};
             return (
@@ -651,12 +713,21 @@ function ConfigView({ talleres,setTalleres,notifConfig,setNotifConfig,usuarios,s
                   <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 16px",flexWrap:"wrap",gap:8 }}>
                     <div>
                       <p style={{ margin:0,fontSize:14,fontWeight:600,color:"#0B2267" }}>{t.nombre}</p>
-                      <div style={{ display:"flex",gap:8,marginTop:4 }}>
-                        {["A","B","C"].map(cat=><span key={cat} style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:6,background:cat==="A"?"#EDE9FE":cat==="B"?"#DBEAFE":"#E0F2FE",color:cat==="A"?"#7C3AED":cat==="B"?"#1E40AF":"#0E7490" }}>Cat.{cat}: {cfg[cat]||0}</span>)}
+                      <div style={{ display:"flex",gap:6,marginTop:4,flexWrap:"wrap",alignItems:"center" }}>
+                        {["A","B","C"].map(cat=>{
+                          const displayCfg = posAutMes[`${t.id}-${configMes}-${configAnio}`]?.categorias_config || cfg;
+                          return <span key={cat} style={{ fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:6,background:cat==="A"?"#EDE9FE":cat==="B"?"#DBEAFE":"#E0F2FE",color:cat==="A"?"#7C3AED":cat==="B"?"#1E40AF":"#0E7490" }}>Cat.{cat}: {displayCfg[cat]||0}</span>;
+                        })}
+                        {posAutMes[`${t.id}-${configMes}-${configAnio}`]&&<span style={{ fontSize:10,background:"#DCFCE7",color:"#14532D",padding:"2px 7px",borderRadius:6,fontWeight:700 }}>✓ Ajuste {MESES_FULL[configMes]}</span>}
                       </div>
                     </div>
                     <div style={{ display:"flex",alignItems:"center",gap:10 }}>
-                      <div style={{ textAlign:"center" }}><p style={{ margin:0,fontSize:20,fontWeight:800,color:"#0B2267" }}>{t.posiciones_autorizadas}</p><p style={{ margin:0,fontSize:10,color:"#94A3B8" }}>total</p></div>
+                      <div style={{ textAlign:"center" }}>
+                        <p style={{ margin:0,fontSize:20,fontWeight:800,color:"#0B2267" }}>
+                          {posAutMes[`${t.id}-${configMes}-${configAnio}`]?.posiciones_autorizadas ?? t.posiciones_autorizadas}
+                        </p>
+                        <p style={{ margin:0,fontSize:10,color:"#94A3B8" }}>total</p>
+                      </div>
                       <button onClick={()=>startEditPos(t)} style={{ border:"1.5px solid #E2E8F0",background:"#fff",borderRadius:9,padding:"7px 14px",fontSize:12,color:"#374151",cursor:"pointer",fontFamily:FONT }}>Modificar</button>
                     </div>
                   </div>
@@ -810,6 +881,7 @@ export default function App() {
   const [toast,        setToast]        = useState(null);
   const [notifConfig,  setNotifConfig]  = useState({ activo:false, correo_destino:"" });
   const [appLoading,   setAppLoading]   = useState(true);
+  const [posAutMes,    setPosAutMes]    = useState({}); // key: tallerId-mes-anio
 
   useEffect(()=>{
     Promise.all([dbLoadTalleres(),dbLoadUsuarios(),dbLoadNotifConfig()]).then(([t,u,n])=>{
@@ -829,17 +901,25 @@ export default function App() {
     setSelected(t); setView("taller");
     const key=pk(t.id,m,a);
     if(posData[key]) return;
+    // Load month-specific authorization override if exists
+    const posAutKey = `${t.id}-${m}-${a}`;
+    const mesConfig = await dbLoadPosAutMes(t.id, m, a);
+    if(mesConfig) {
+      setPosAutMes(prev=>({...prev,[posAutKey]:mesConfig}));
+    }
+    const posAut = mesConfig ? mesConfig.posiciones_autorizadas : t.posiciones_autorizadas;
+    const catCfg = mesConfig ? mesConfig.categorias_config : t.categorias_config;
+
     let rows=await dbLoadPosiciones(t.id,m,a);
     if(!rows||rows.length===0){
       const prev=await dbLoadPosicionesPrevMonth(t.id,m,a);
       if(prev.length>0){
         rows=prev.map(p=>({ ...p,id:`${t.id}-${m}-${a}-${p.numero}`,mes:m,anio:a,updated_at:new Date().toISOString(),updated_by:"" }));
       } else {
-        const cfg=t.categorias_config;
-        if(cfg&&(cfg.A||cfg.B||cfg.C)){
-          rows=genPosicionesDesdeConfig(t.id,cfg,m,a);
+        if(catCfg&&(catCfg.A||catCfg.B||catCfg.C)){
+          rows=genPosicionesDesdeConfig(t.id,catCfg,m,a);
         } else {
-          rows=genPosicionesVacias(t.id,t.posiciones_autorizadas,m,a);
+          rows=genPosicionesVacias(t.id,posAut,m,a);
         }
       }
       await dbUpsertPosiciones(rows);
@@ -869,7 +949,7 @@ export default function App() {
       <Nav user={user} view={view} setView={setView} onLogout={logout}/>
       {view==="dashboard"&&<Dashboard talleres={talleres} posData={posData} onSelect={(t)=>doSelect(t,mes,anio)} mes={mes} setMes={(m)=>{setMes(m);if(selected)doSelect(selected,m,anio);}} anio={anio} setAnio={(a)=>{setAnio(a);if(selected)doSelect(selected,mes,a);}}/>}
       {view==="taller"&&selected&&<TallerView taller={selected} posiciones={posData[pk(selected.id,mes,anio)]||[]} onUpdate={updatePos} onBulkUpdate={bulkUpdatePos} mes={mes} setMes={(m)=>{setMes(m);doSelect(selected,m,anio);}} anio={anio} setAnio={(a)=>{setAnio(a);doSelect(selected,mes,a);}} notifConfig={notifConfig} user={user} onToast={showToast}/>}
-      {view==="config"&&<ConfigView talleres={talleres} setTalleres={setTalleres} notifConfig={notifConfig} setNotifConfig={setNotifConfig} usuarios={usuarios} setUsuarios={setUsuarios} user={user}/>}
+      {view==="config"&&<ConfigView talleres={talleres} setTalleres={setTalleres} notifConfig={notifConfig} setNotifConfig={setNotifConfig} usuarios={usuarios} setUsuarios={setUsuarios} user={user} posAutMes={posAutMes} setPosAutMes={setPosAutMes} mes={mes} anio={anio}/>}
       <Toast msg={toast}/>
     </div>
   );
